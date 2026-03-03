@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     minio_bucket: str = "resumes"
     minio_secure: bool = False
 
-    # Ollama (native on host Mac, accessed via host.docker.internal from Docker)
-    ollama_base_url: str = "http://host.docker.internal:11434"
+    # Ollama (containerised; override via OLLAMA_BASE_URL env var)
+    ollama_base_url: str = "http://ollama:11434"
     ollama_model_coder: str = "qwen2.5-coder:7b"
     ollama_model_general: str = "qwen2.5:7b"
     # Fast model for structured extraction (JSON parsing) — smaller = faster

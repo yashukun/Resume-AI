@@ -52,6 +52,54 @@ services:
       timeout: 20s
       retries: 3
 
+  # Ollama LLM Server
+  ollama:
+    image: ollama/ollama:latest
+    container_name: resume_ai_ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_MAX_LOADED_MODELS=2
+      - OLLAMA_KEEP_ALIVE=-1
+    deploy:
+      resources:
+        limits:
+          memory: 20g
+          cpus: "10"
+        reservations:
+          memory: 16g
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # One-shot init: pull models and warm them into memory
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: resume_ai_ollama_init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo '>>> Pulling llama3.2:3b …'
+        ollama pull llama3.2:3b
+        echo '>>> Pulling qwen2.5:7b …'
+        ollama pull qwen2.5:7b
+        echo '>>> Warming up llama3.2:3b …'
+        curl -s http://ollama:11434/api/generate -d '{"model":"llama3.2:3b","prompt":"hi","stream":false,"options":{"num_predict":1}}' > /dev/null
+        echo '>>> Warming up qwen2.5:7b …'
+        curl -s http://ollama:11434/api/generate -d '{"model":"qwen2.5:7b","prompt":"hi","stream":false,"options":{"num_predict":1}}' > /dev/null
+        echo '>>> Both models pulled and loaded into memory.'
+    environment:
+      - OLLAMA_HOST=ollama
+
   # FastAPI Backend
   backend:
     build:
@@ -65,7 +113,7 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin123
       - MINIO_BUCKET=resumes
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_BASE_URL=http://ollama:11434
     ports:
       - "8000:8000"
     volumes:
@@ -77,6 +125,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   # Celery Worker
@@ -92,7 +142,7 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin123
       - MINIO_BUCKET=resumes
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_BASE_URL=http://ollama:11434
     volumes:
       - ./backend:/app
     depends_on:
@@ -100,6 +150,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
     command: celery -A app.workers.celery_app worker --loglevel=info --pool=prefork --concurrency=1 -Q celery,resume_processing,ai_optimization
 
   # React Frontend
@@ -123,3 +175,4 @@ volumes:
   postgres_data:
   redis_data:
   minio_data:
+  ollama_data:

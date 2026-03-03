@@ -54,7 +54,7 @@ def _get_client() -> httpx.AsyncClient:
 
     if _http_client is None or _http_client.is_closed or _client_loop_id != loop_id:
         _http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=httpx.Timeout(900.0, connect=30.0),
             limits=httpx.Limits(max_connections=10,
                                 max_keepalive_connections=5),
         )
@@ -328,7 +328,7 @@ class AIService:
             # Use fast (smaller) model for extraction
             model=self.fast_model,
             temperature=0.1,            # Low temp for consistent structured output
-            timeout=120.0,              # 2 min — no contention with concurrency=1
+            timeout=600.0,              # 10 min — CPU-only inference in Docker on Mac
             json_mode=True,             # Constrained decoding → guaranteed valid JSON
             num_predict=4096,           # Cap output length
             num_ctx=8192,               # Smaller context = faster KV cache
@@ -544,7 +544,7 @@ class AIService:
                 response = await client.post(
                     f"{self.base_url}/api/generate",
                     json=payload,
-                    timeout=120.0,
+                    timeout=600.0,
                 )
             elapsed = time.monotonic() - t0
 
@@ -643,7 +643,7 @@ class AIService:
             messages=messages,
             model=self.fast_model,      # Fast model for extraction
             temperature=0.1,
-            timeout=60.0,
+            timeout=300.0,              # 5 min — CPU-only inference in Docker on Mac
             json_mode=True,             # Constrained JSON decoding
             num_predict=2048,
             num_ctx=4096,               # JDs are shorter, 4K context is fine
