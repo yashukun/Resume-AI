@@ -1,0 +1,50 @@
+from sqlalchemy import Column, String, Text, DateTime, Enum as SQLEnum
+from sqlalchemy.dialects.postgresql import UUID
+from datetime import datetime
+import uuid
+import enum
+from app.core.database import Base
+
+
+class JobStatus(str, enum.Enum):
+    PENDING = "pending"
+    PARSING = "parsing"
+    PROCESSING = "processing"
+    OPTIMIZING = "optimizing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class Job(Base):
+    """Job model for tracking resume processing tasks."""
+
+    __tablename__ = "jobs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    status = Column(SQLEnum(JobStatus),
+                    default=JobStatus.PENDING, nullable=False)
+
+    # Original file info
+    original_filename = Column(String(255), nullable=False)
+    original_file_path = Column(String(500), nullable=False)
+    file_type = Column(String(10), nullable=False)  # pdf, docx
+
+    # Job description
+    job_description = Column(Text, nullable=False)
+    job_title = Column(String(255), nullable=True)
+    company_name = Column(String(255), nullable=True)
+
+    # Output
+    optimized_file_path = Column(String(500), nullable=True)
+
+    # Error tracking
+    error_message = Column(Text, nullable=True)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow,
+                        onupdate=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    def __repr__(self):
+        return f"<Job {self.id} - {self.status}>"
