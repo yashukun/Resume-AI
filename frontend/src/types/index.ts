@@ -32,6 +32,18 @@ export interface UploadResponse {
   job_id: string;
   message: string;
   status: JobStatus;
+  user_resume_id?: string;
+  reused_existing_parse?: boolean;
+}
+
+export interface UserResumeSummary {
+  id: string;
+  original_filename: string;
+  file_type: string;
+  file_hash: string;
+  name?: string;
+  is_parsed: boolean;
+  created_at: string;
 }
 
 export interface PersonalInfo {

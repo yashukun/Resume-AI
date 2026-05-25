@@ -1,0 +1,203 @@
+version: "3.8"
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: resume_ai_postgres
+    environment:
+      POSTGRES_USER: resume_ai
+      POSTGRES_PASSWORD: resume_ai_secret
+      POSTGRES_DB: resume_ai_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resume_ai -d resume_ai_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Celery
+  redis:
+    image: redis:7-alpine
+    container_name: resume_ai_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO (S3-compatible storage)
+  minio:
+    image: minio/minio:latest
+    container_name: resume_ai_minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000" # API
+      - "9001:9001" # Console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ───────────────────────────────────────────────────────────────────
+  # Ollama — RUN ON THE HOST (recommended for Mac / Apple Silicon).
+  # ───────────────────────────────────────────────────────────────────
+  # Why the host?
+  #   Docker Desktop on Mac runs containers under a Linux VM that has
+  #   NO access to Metal / GPU. Running Ollama inside the container
+  #   means CPU-only inference at ~100-500ms per token — a single
+  #   resume-extract call can take 10+ minutes and time out.
+  #   Running Ollama natively on macOS uses Metal acceleration and is
+  #   typically 10-30× faster.
+  #
+  # Host setup (Mac):
+  #   1) brew install ollama
+  #   2) ollama serve                              # leaves it running
+  #   3) ollama pull llama3.2:3b
+  #   4) ollama pull qwen2.5:7b
+  #   5) docker compose up -d                     # backend/worker reach the host
+  #
+  # The backend and celery_worker reach the host via
+  # `host.docker.internal:11434` (see their environment + extra_hosts).
+  #
+  # If you want to go back to containerized Ollama (e.g. on a Linux
+  # host with NVIDIA GPUs), uncomment the two services below and the
+  # `ollama-init` dependency in backend + celery_worker, and set
+  # OLLAMA_BASE_URL back to `http://ollama:11434`.
+  #
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: resume_ai_ollama
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   environment:
+  #     - OLLAMA_HOST=0.0.0.0
+  #     - OLLAMA_NUM_PARALLEL=1
+  #     - OLLAMA_MAX_LOADED_MODELS=1
+  #     - OLLAMA_KEEP_ALIVE=-1
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 20g
+  #         cpus: "10"
+  #       reservations:
+  #         memory: 16g
+  #   healthcheck:
+  #     test: ["CMD", "ollama", "list"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #     start_period: 30s
+  #
+  # ollama-init:
+  #   image: ollama/ollama:latest
+  #   container_name: resume_ai_ollama_init
+  #   depends_on:
+  #     ollama:
+  #       condition: service_healthy
+  #   restart: "no"
+  #   entrypoint: ["/bin/sh", "-c"]
+  #   command:
+  #     - |
+  #       ollama pull llama3.2:3b
+  #       ollama pull qwen2.5:7b
+  #       curl -s http://ollama:11434/api/generate -d '{"model":"llama3.2:3b","prompt":"hi","stream":false,"options":{"num_predict":1}}' > /dev/null
+  #       curl -s http://ollama:11434/api/generate -d '{"model":"qwen2.5:7b","prompt":"hi","stream":false,"options":{"num_predict":1}}' > /dev/null
+  #   environment:
+  #     - OLLAMA_HOST=ollama
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: resume_ai_backend
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://resume_ai:resume_ai_secret@postgres:5432/resume_ai_db
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin123
+      - MINIO_BUCKET=resumes
+      # Talks to Ollama running on the host (see top of file for setup).
+      # Override OLLAMA_BASE_URL in .env if your host uses a different
+      # address (e.g. another machine on the network, or a remote server).
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    # `host.docker.internal` is resolvable on Mac/Windows by default,
+    # and via this extra_hosts entry on Linux (Docker 20.10+).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery Worker
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: resume_ai_celery_worker
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://resume_ai:resume_ai_secret@postgres:5432/resume_ai_db
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin123
+      - MINIO_BUCKET=resumes
+      # Same host-Ollama setup as backend (see top of file).
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    volumes:
+      - ./backend:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.workers.celery_app worker --loglevel=info --pool=prefork --concurrency=1 -Q celery,resume_processing,ai_optimization
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: resume_ai_frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    command: npm run dev -- --host 0.0.0.0
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  ollama_data:

@@ -25,6 +25,7 @@ class JobCreate(BaseModel):
 class JobResponse(BaseModel):
     id: UUID
     status: JobStatus
+    user_resume_id: Optional[UUID] = None
     original_filename: str
     file_type: str
     job_description: str
@@ -70,6 +71,40 @@ class UploadResponse(BaseModel):
     job_id: UUID
     message: str
     status: JobStatus
+    user_resume_id: Optional[UUID] = None
+    # True when the uploaded file's bytes matched an already-parsed
+    # library entry — the parse step is skipped for this job.
+    reused_existing_parse: bool = False
+
+
+# Library (UserResume) Schemas
+class UserResumeSummary(BaseModel):
+    """Lightweight library entry — for list/picker UIs."""
+
+    id: UUID
+    original_filename: str
+    file_type: str
+    file_hash: str
+    name: Optional[str] = None  # extracted from user_details if available
+    is_parsed: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class UserResumeDetail(UserResumeSummary):
+    """Full library entry, including parsed JSON."""
+
+    user_details: Optional[Dict[str, Any]] = None
+    raw_text: Optional[str] = None
+
+
+class JobFromExistingRequest(BaseModel):
+    user_resume_id: UUID
+    job_description: str = Field(..., min_length=50)
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
 
 
 # Health Check

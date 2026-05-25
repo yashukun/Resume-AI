@@ -6,10 +6,18 @@ from app.core.database import get_db
 from app.core.config import settings
 from app.models.job import Job, JobStatus
 from app.models.resume import Resume
-from app.schemas import JobResponse, JobStatusResponse, UploadResponse, ResumeResponse
+from app.models.user_resume import UserResume
+from app.schemas import (
+    JobResponse,
+    JobStatusResponse,
+    UploadResponse,
+    ResumeResponse,
+    JobFromExistingRequest,
+)
 from app.services.storage import storage_service
 from app.workers.tasks import process_resume
 import uuid
+import hashlib
 from typing import List, Optional
 import os
 import io
@@ -56,30 +64,50 @@ async def upload_resume(
             detail=f"File too large. Maximum size: {settings.max_upload_size // (1024*1024)}MB"
         )
 
-    # Generate unique filename
-    job_id = uuid.uuid4()
-    storage_filename = f"uploads/{job_id}/{filename}"
-
-    # Determine content type
-    content_type = "application/pdf" if ext == ".pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-
-    # Upload to storage
-    try:
-        file_path = await storage_service.upload_file(
-            content,
-            storage_filename,
-            content_type
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to upload file: {str(e)}"
-        )
-
-    # Create job record
+    # Library lookup: if we've seen this exact file before, link the job
+    # to the existing library entry and skip re-uploading bytes to MinIO.
+    file_hash = hashlib.sha256(content).hexdigest()
     file_type = ext.replace(".", "")
+    job_id = uuid.uuid4()
+    content_type = (
+        "application/pdf" if ext == ".pdf"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+
+    existing_q = await db.execute(
+        select(UserResume).where(UserResume.file_hash == file_hash)
+    )
+    library_entry = existing_q.scalar_one_or_none()
+    reused_existing_parse = bool(
+        library_entry and library_entry.user_details
+    )
+
+    if library_entry:
+        file_path = library_entry.original_file_path
+    else:
+        storage_filename = f"library/{uuid.uuid4()}/{filename}"
+        try:
+            file_path = await storage_service.upload_file(
+                content, storage_filename, content_type
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to upload file: {str(e)}",
+            )
+        library_entry = UserResume(
+            file_hash=file_hash,
+            original_filename=filename,
+            original_file_path=file_path,
+            file_type=file_type,
+        )
+        db.add(library_entry)
+        await db.flush()  # populate library_entry.id
+
+    # Create job record linked to the library entry
     job = Job(
         id=job_id,
+        user_resume_id=library_entry.id,
         original_filename=filename,
         original_file_path=file_path,
         file_type=file_type,
@@ -97,8 +125,64 @@ async def upload_resume(
 
     return UploadResponse(
         job_id=job_id,
-        message="Resume uploaded successfully. Processing started.",
+        user_resume_id=library_entry.id,
+        message=(
+            "Reusing previously parsed resume. Optimization starting."
+            if reused_existing_parse
+            else "Resume uploaded successfully. Processing started."
+        ),
         status=JobStatus.PENDING,
+        reused_existing_parse=reused_existing_parse,
+    )
+
+
+@router.post("/resume/from-existing", response_model=UploadResponse)
+async def create_job_from_existing_resume(
+    payload: JobFromExistingRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create a new optimization job using a resume already in the library.
+
+    No file upload — the parsed data is reused, so processing jumps
+    straight past the parse step into optimization.
+    """
+    lib_q = await db.execute(
+        select(UserResume).where(UserResume.id == payload.user_resume_id)
+    )
+    library_entry = lib_q.scalar_one_or_none()
+    if not library_entry:
+        raise HTTPException(
+            status_code=404, detail="Resume not found in library"
+        )
+
+    job_id = uuid.uuid4()
+    job = Job(
+        id=job_id,
+        user_resume_id=library_entry.id,
+        original_filename=library_entry.original_filename,
+        original_file_path=library_entry.original_file_path,
+        file_type=library_entry.file_type,
+        job_description=payload.job_description,
+        job_title=payload.job_title,
+        company_name=payload.company_name,
+        status=JobStatus.PENDING,
+    )
+    db.add(job)
+    await db.commit()
+
+    process_resume.delay(str(job_id))
+
+    return UploadResponse(
+        job_id=job_id,
+        user_resume_id=library_entry.id,
+        message=(
+            "Reusing previously parsed resume. Optimization starting."
+            if library_entry.user_details
+            else "Resume queued — parsing required, then optimizing."
+        ),
+        status=JobStatus.PENDING,
+        reused_existing_parse=bool(library_entry.user_details),
     )
 
 
@@ -212,13 +296,16 @@ async def delete_job(
     if resume:
         await db.delete(resume)
 
-    # Delete from storage
-    try:
-        file_path = job.original_file_path.replace(
-            f"{storage_service.bucket}/", "")
-        await storage_service.delete_file(file_path)
-    except Exception:
-        pass  # Ignore storage deletion errors
+    # Delete only the generated outputs for this job. The original
+    # upload bytes are owned by the UserResume library entry and may
+    # be shared with other jobs — deleting it here would break them.
+    for suffix in ("optimized_resume.docx", "optimized_resume.pdf"):
+        try:
+            await storage_service.delete_file(
+                f"generated/{job_id}/{suffix}"
+            )
+        except Exception:
+            pass
 
     await db.delete(job)
     await db.commit()

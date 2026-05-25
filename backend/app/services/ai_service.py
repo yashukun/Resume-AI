@@ -14,14 +14,72 @@ class ResumeExtractionError(Exception):
     pass
 
 
+class PreflightError(Exception):
+    """
+    Raised when the LLM environment isn't usable (Ollama unreachable,
+    required model not pulled, etc.).
+
+    These are NOT transient — retrying with the same broken environment
+    is wasted time and floods logs. Celery tasks should catch this and
+    fail the job immediately with a user-facing message instead of
+    looping through the retry schedule.
+    """
+    pass
+
+
+def _smart_truncate(text: str, max_chars: int, anchor_terms=None) -> str:
+    """
+    Truncate `text` to `max_chars`, but keep BOTH ends intact and trim
+    the middle. A resume's most important info is in the header (name,
+    contact, summary, skills) AND the most recent experience (top of
+    chronological list). The middle of a long resume is the least
+    critical for ATS / matching.
+
+    Falls back to head-only truncation if the input is short or the
+    anchor terms aren't found.
+
+    Args:
+        text: The full input text
+        max_chars: Hard cap on output length
+        anchor_terms: Optional list of strings — if found near the end,
+                      we preserve a window around them (useful for keeping
+                      "Required Skills" / "Responsibilities" in a JD)
+    """
+    if not text or len(text) <= max_chars:
+        return text
+
+    head_budget = int(max_chars * 0.65)  # 65 % from the top
+    tail_budget = max_chars - head_budget - 50  # 50 chars for the joiner
+    head = text[:head_budget]
+    tail = text[-tail_budget:] if tail_budget > 0 else ""
+
+    # If anchor terms are provided, try to align the tail window so it
+    # starts on the earliest anchor occurrence near the end.
+    if anchor_terms and tail_budget > 0:
+        search_start = max(head_budget, len(text) - tail_budget * 2)
+        earliest = len(text)
+        for term in anchor_terms:
+            idx = text.lower().find(term.lower(), search_start)
+            if idx != -1 and idx < earliest:
+                earliest = idx
+        if earliest < len(text):
+            anchored_tail = text[earliest: earliest + tail_budget]
+            if anchored_tail:
+                tail = anchored_tail
+
+    return f"{head}\n\n[... middle section truncated for length ...]\n\n{tail}"
+
+
 # Event-loop-aware HTTP client — each new event-loop (= each Celery task) gets
 # a fresh client, preventing asyncio transport corruption in forked workers.
 _http_client: Optional[httpx.AsyncClient] = None
 _client_loop_id: Optional[int] = None
 
-# Semaphore to serialize LLM calls — Ollama can only run one inference at a time
-# efficiently. Without this, asyncio.gather sends concurrent requests that pile
-# up in Ollama's queue, causing timeouts.
+# Semaphore that throttles concurrent LLM calls. Configurable so the
+# pipeline can run a few sections in parallel when Ollama is started
+# with OLLAMA_NUM_PARALLEL>=2 (and the host has VRAM headroom). Setting
+# this above what Ollama can actually serve just queues internally —
+# tune both together.
 _ollama_semaphore: Optional[asyncio.Semaphore] = None
 _semaphore_loop_id: Optional[int] = None
 
@@ -34,7 +92,9 @@ def _get_semaphore() -> asyncio.Semaphore:
     except RuntimeError:
         loop_id = None
     if _ollama_semaphore is None or _semaphore_loop_id != loop_id:
-        _ollama_semaphore = asyncio.Semaphore(1)
+        _ollama_semaphore = asyncio.Semaphore(
+            max(1, settings.ollama_parallel)
+        )
         _semaphore_loop_id = loop_id
     return _ollama_semaphore
 
@@ -195,6 +255,63 @@ class AIService:
             logger.error(f"Error listing models: {e}")
         return []
 
+    async def preflight(self, required_models: Optional[List[str]] = None) -> None:
+        """
+        Verify Ollama is reachable AND the required models are pulled
+        BEFORE we start a long-running task.
+
+        Raises:
+            PreflightError: with a user-facing message that explains the
+            exact fix (start Ollama / pull a model). Tasks should
+            translate this into ``Job.error_message`` and skip retry.
+
+        Why fail fast here:
+            A single LLM call has a 20-minute httpx timeout, and the
+            task retries 3× — so a missing dependency can leave a job
+            stuck on "PARSING" for an hour before we even tell the user
+            something is wrong. The preflight runs in <1 second and
+            converts that into an immediate, actionable error.
+        """
+        required = required_models or [self.fast_model, self.general_model]
+
+        # 1) Is Ollama reachable at all? Use a short timeout — if the
+        # service is down, the OS returns Connection-Refused in <1ms.
+        try:
+            client = _get_client()
+            response = await client.get(
+                f"{self.base_url}/api/tags", timeout=3.0,
+            )
+        except Exception as e:
+            raise PreflightError(
+                f"Ollama is not reachable at {self.base_url}. "
+                f"Start it on the host with `ollama serve` (Mac: "
+                f"`brew services start ollama`) and try again. "
+                f"Underlying error: {type(e).__name__}: {e}"
+            ) from e
+
+        if response.status_code != 200:
+            raise PreflightError(
+                f"Ollama responded with HTTP {response.status_code} at "
+                f"{self.base_url}/api/tags. Expected 200. "
+                f"Body: {response.text[:200]}"
+            )
+
+        # 2) Are the required models pulled? Match on prefix because
+        # Ollama tags are returned as e.g. "llama3.2:3b" — exact match.
+        available = {m["name"] for m in response.json().get("models", [])}
+        missing = [m for m in required if m not in available]
+        if missing:
+            raise PreflightError(
+                f"Ollama is running but these required models are not "
+                f"pulled: {', '.join(missing)}. Run: "
+                + " && ".join(f"`ollama pull {m}`" for m in missing)
+            )
+
+        logger.info(
+            f"Preflight OK — Ollama up at {self.base_url}, "
+            f"models available: {sorted(required)}"
+        )
+
     async def chat_completion(
         self,
         messages: List[Dict[str, str]],
@@ -252,23 +369,46 @@ class AIService:
                 f" (semaphore={'locked' if sem.locked() else 'free'})")
             async with sem:
                 wait_time = time.monotonic() - t0
-                if wait_time > 0.5:
-                    logger.info(
-                        f"LLM semaphore acquired after {wait_time:.1f}s wait")
+                # Always log wait time so we can distinguish "Ollama is
+                # slow" from "our semaphore is holding us back".
+                logger.info(
+                    f"LLM semaphore acquired after {wait_time:.1f}s "
+                    f"(model={model})"
+                )
+                t_send = time.monotonic()
                 client = _get_client()
                 response = await client.post(
                     f"{self.base_url}/api/chat",
                     json=payload,
                     timeout=timeout,
                 )
+                inference_elapsed = time.monotonic() - t_send
 
             elapsed = time.monotonic() - t0
             if response.status_code == 200:
                 data = response.json()
                 content = data.get("message", {}).get("content", "")
+                # Try to surface Ollama's own timings (eval_count /
+                # eval_duration) so we can tell prefill from generation.
+                eval_count = data.get("eval_count")
+                eval_duration_s = (
+                    (data.get("eval_duration") or 0) / 1e9
+                )
+                tok_per_s = (
+                    eval_count / eval_duration_s
+                    if eval_count and eval_duration_s
+                    else None
+                )
                 logger.info(
-                    f"LLM response: {len(content)} chars in {elapsed:.1f}s "
-                    f"(model={model})")
+                    f"LLM response: {len(content)} chars, "
+                    f"inference={inference_elapsed:.1f}s, "
+                    f"total={elapsed:.1f}s, "
+                    f"tokens={eval_count}, "
+                    f"speed={tok_per_s:.1f} t/s" if tok_per_s
+                    else f"LLM response: {len(content)} chars, "
+                         f"inference={inference_elapsed:.1f}s, "
+                         f"total={elapsed:.1f}s (model={model})"
+                )
                 return content
             else:
                 logger.error(
@@ -311,12 +451,13 @@ class AIService:
             for category, urls in links.items():
                 user_content += f"{category.capitalize()}: {', '.join(urls)}\n"
 
-        # Truncate overly long resumes — 6000 chars is ~2K tokens, plenty
+        # Smart truncation — preserves both ends of the resume (header +
+        # most recent experience), trims the middle. Better than naive
+        # head-only truncation which silently drops the bottom roles.
         if len(user_content) > 8000:
             logger.info(
-                f"Truncating resume input from {len(user_content)} to 8000 chars")
-            user_content = user_content[:8000] + \
-                "\n[... truncated for speed ...]"
+                f"Smart-truncating resume input from {len(user_content)} to 8000 chars")
+            user_content = _smart_truncate(user_content, 8000)
 
         messages = [
             {"role": "system", "content": RESUME_EXTRACTION_SYSTEM_PROMPT},
@@ -328,10 +469,15 @@ class AIService:
             # Use fast (smaller) model for extraction
             model=self.fast_model,
             temperature=0.1,            # Low temp for consistent structured output
-            timeout=600.0,              # 10 min — CPU-only inference in Docker on Mac
+            # On CPU-only inference (Docker on Mac), each output token
+            # costs ~100-500ms. The old (4096 predict, 8192 ctx) combo
+            # could take 10+ minutes and timed out under Celery's limit.
+            # 2048 output tokens is plenty for a resume JSON. 6144 ctx
+            # comfortably fits our smart-truncated 8000-char input.
+            timeout=1200.0,             # 20 min cap — well under Celery's 25 min soft limit
             json_mode=True,             # Constrained decoding → guaranteed valid JSON
-            num_predict=4096,           # Cap output length
-            num_ctx=8192,               # Smaller context = faster KV cache
+            num_predict=2048,           # Cap output length (was 4096)
+            num_ctx=6144,               # Smaller context = faster KV cache (was 8192)
         )
 
         logger.info(f"AI response received ({len(response)} chars)")
@@ -627,12 +773,20 @@ class AIService:
                 responsibilities[], keywords[]
             }
         """
-        # Truncate very long JDs
+        # Smart-truncate long JDs — try to keep "Requirements", "Responsibilities",
+        # and "Qualifications" sections in the tail, which are usually near the
+        # bottom of long JDs and carry the most ATS-relevant terms.
         jd_input = job_description
         if len(jd_input) > 5000:
             logger.info(
-                f"Truncating JD input from {len(jd_input)} to 5000 chars")
-            jd_input = jd_input[:5000]
+                f"Smart-truncating JD input from {len(jd_input)} to 5000 chars")
+            jd_input = _smart_truncate(
+                jd_input, 5000,
+                anchor_terms=[
+                    "requirements", "qualifications", "responsibilities",
+                    "must have", "required skills", "what you'll do",
+                ],
+            )
 
         messages = [
             {"role": "system", "content": JD_EXTRACTION_SYSTEM_PROMPT},
@@ -643,9 +797,9 @@ class AIService:
             messages=messages,
             model=self.fast_model,      # Fast model for extraction
             temperature=0.1,
-            timeout=300.0,              # 5 min — CPU-only inference in Docker on Mac
+            timeout=600.0,              # 10 min — JDs produce smaller output than resumes
             json_mode=True,             # Constrained JSON decoding
-            num_predict=2048,
+            num_predict=1024,           # JD output is small (skills + keywords list)
             num_ctx=4096,               # JDs are shorter, 4K context is fine
         )
 

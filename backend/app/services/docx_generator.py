@@ -45,6 +45,13 @@ class DocxGenerator:
         """
         Generate a DOCX file from resume JSON.
 
+        IMPORTANT: This intentionally only reads the candidate-facing
+        resume fields (name, contact, summary, skills, experience,
+        projects, education, certifications). Internal metadata such
+        as `optimization_metadata` (which contains the gap_analysis
+        and ATS deltas) MUST NEVER appear in the printed resume —
+        that information is for the user's UI, not the employer.
+
         Args:
             resume_data: Optimized resume JSON (flat schema)
 

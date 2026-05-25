@@ -1,5 +1,12 @@
 import axios from 'axios';
-import type { UploadResponse, Job, JobStatusResponse, ResumeData, HealthCheck } from '../types';
+import type {
+  UploadResponse,
+  Job,
+  JobStatusResponse,
+  ResumeData,
+  HealthCheck,
+  UserResumeSummary,
+} from '../types';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const API_PREFIX = '/api/v1';
@@ -103,6 +110,45 @@ export const apiService = {
    */
   healthCheck: async (): Promise<HealthCheck> => {
     const response = await api.get<HealthCheck>('/health');
+    return response.data;
+  },
+
+  /**
+   * List parsed resumes in the user's library (most recent first).
+   */
+  listUserResumes: async (limit = 50, offset = 0): Promise<UserResumeSummary[]> => {
+    const response = await api.get<UserResumeSummary[]>(
+      `/resumes?limit=${limit}&offset=${offset}`,
+    );
+    return response.data;
+  },
+
+  /**
+   * Delete a resume from the library.
+   */
+  deleteUserResume: async (resumeId: string): Promise<void> => {
+    await api.delete(`/resumes/${resumeId}`);
+  },
+
+  /**
+   * Create a new optimization job using a resume already in the library.
+   * Skips file upload + parsing entirely.
+   */
+  createJobFromExisting: async (
+    userResumeId: string,
+    jobDescription: string,
+    jobTitle?: string,
+    companyName?: string,
+  ): Promise<UploadResponse> => {
+    const response = await api.post<UploadResponse>(
+      '/upload/resume/from-existing',
+      {
+        user_resume_id: userResumeId,
+        job_description: jobDescription,
+        job_title: jobTitle,
+        company_name: companyName,
+      },
+    );
     return response.data;
   },
 };

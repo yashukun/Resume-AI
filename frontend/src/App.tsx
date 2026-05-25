@@ -5,18 +5,21 @@ import { JobDescriptionInput } from "./components/JobDescriptionInput";
 import { StatusDisplay } from "./components/StatusDisplay";
 import { HealthIndicator } from "./components/HealthIndicator";
 import { JobHistory } from "./components/JobHistory";
+import { ResumeLibrary } from "./components/ResumeLibrary";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { useToast } from "./components/Toast";
 import { apiService } from "./services/api";
 import { usePolling } from "./hooks/usePolling";
 import { useHealthCheck } from "./hooks/useHealthCheck";
 import { useDarkMode } from "./hooks/useDarkMode";
-import type { JobStatusResponse } from "./types";
+import type { JobStatusResponse, UserResumeSummary } from "./types";
 import { cn } from "./utils/cn";
 
 function App() {
   // Form state
   const [file, setFile] = useState<File | null>(null);
+  const [selectedResume, setSelectedResume] =
+    useState<UserResumeSummary | null>(null);
   const [jobDescription, setJobDescription] = useState("");
   const [jobTitle, setJobTitle] = useState("");
   const [companyName, setCompanyName] = useState("");
@@ -26,6 +29,7 @@ function App() {
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<JobStatusResponse | null>(null);
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const [libraryRefreshKey, setLibraryRefreshKey] = useState(0);
 
   // Refs for auto-scroll
   const statusRef = useRef<HTMLDivElement>(null);
@@ -36,8 +40,10 @@ function App() {
   const { isOnline } = useHealthCheck();
   const { addToast } = useToast();
 
-  // Check if form is valid
-  const isFormValid = file !== null && jobDescription.length >= 50;
+  // A submission needs *either* a fresh file or a picked library resume,
+  // plus a JD of at least 50 chars.
+  const hasResumeSource = file !== null || selectedResume !== null;
+  const isFormValid = hasResumeSource && jobDescription.length >= 50;
 
   // Adaptive polling callback
   const pollCallback = useCallback(async (): Promise<boolean> => {
@@ -90,30 +96,45 @@ function App() {
 
   // Handle form submission
   const handleSubmit = async () => {
-    if (!isFormValid || !file) return;
+    if (!isFormValid) return;
 
     setIsUploading(true);
     setJobStatus(null);
 
     try {
-      const response = await apiService.uploadResume(
-        file,
-        jobDescription,
-        jobTitle || undefined,
-        companyName || undefined,
-      );
+      const response = selectedResume
+        ? await apiService.createJobFromExisting(
+            selectedResume.id,
+            jobDescription,
+            jobTitle || undefined,
+            companyName || undefined,
+          )
+        : await apiService.uploadResume(
+            file as File,
+            jobDescription,
+            jobTitle || undefined,
+            companyName || undefined,
+          );
 
       setCurrentJobId(response.job_id);
       setJobStatus({
         id: response.job_id,
         status: response.status,
-        progress_message: "Job queued for processing",
+        progress_message: response.reused_existing_parse
+          ? "Reusing saved resume — jumping to optimization"
+          : "Job queued for processing",
       });
+      // Re-fetch library so a freshly uploaded resume appears in the list.
+      setLibraryRefreshKey((k) => k + 1);
 
       addToast({
         type: "info",
-        title: "Upload Successful",
-        message: "Your resume is being processed.",
+        title: response.reused_existing_parse
+          ? "Skipping Parse"
+          : "Upload Successful",
+        message: response.reused_existing_parse
+          ? "Using your previously parsed resume — much faster."
+          : "Your resume is being processed.",
         duration: 3000,
       });
 
@@ -158,11 +179,24 @@ function App() {
   // Reset form
   const handleReset = () => {
     setFile(null);
+    setSelectedResume(null);
     setJobDescription("");
     setJobTitle("");
     setCompanyName("");
     setCurrentJobId(null);
     setJobStatus(null);
+  };
+
+  // Selecting a library entry hides the file picker; clearing a file
+  // hides the library highlight — the two inputs are mutually exclusive.
+  const handleSelectLibraryResume = (r: UserResumeSummary | null) => {
+    setSelectedResume(r);
+    if (r) setFile(null);
+  };
+
+  const handleFileSelect = (f: File) => {
+    setFile(f);
+    setSelectedResume(null);
   };
 
   return (
@@ -264,21 +298,37 @@ function App() {
         {/* Main Form */}
         <div className="bg-white dark:bg-surface-800 rounded-3xl border border-gray-200/80 dark:border-white/5 shadow-xl shadow-gray-200/50 dark:shadow-black/30 overflow-hidden animate-fadeInUp">
           <div className="p-6 sm:p-8 space-y-8">
-            {/* Step 1: Upload Resume */}
+            {/* Step 1: Pick or Upload Resume */}
             <section>
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-8 h-8 bg-gradient-to-br from-primary-500 to-accent-600 rounded-full flex items-center justify-center text-white text-sm font-bold shadow-md shadow-primary-500/25">
                   1
                 </div>
                 <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                  Upload Your Resume
+                  Choose Your Resume
                 </h3>
               </div>
-              <FileUpload
-                onFileSelect={setFile}
-                selectedFile={file}
-                onClear={() => setFile(null)}
-              />
+
+              <div className="space-y-4">
+                <ResumeLibrary
+                  selectedResumeId={selectedResume?.id ?? null}
+                  onSelect={handleSelectLibraryResume}
+                  refreshKey={libraryRefreshKey}
+                />
+
+                {!selectedResume && (
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-gray-400 dark:text-slate-500 mb-2">
+                      Or upload a new one
+                    </p>
+                    <FileUpload
+                      onFileSelect={handleFileSelect}
+                      selectedFile={file}
+                      onClear={() => setFile(null)}
+                    />
+                  </div>
+                )}
+              </div>
             </section>
 
             {/* Step 2: Job Description */}
@@ -287,7 +337,7 @@ function App() {
                 <div
                   className={cn(
                     "w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold shadow-md transition-all duration-500",
-                    file
+                    hasResumeSource
                       ? "bg-gradient-to-br from-primary-500 to-accent-600 text-white shadow-primary-500/25"
                       : "bg-gray-200 dark:bg-surface-700 text-gray-400 dark:text-slate-500 shadow-none",
                   )}
@@ -297,7 +347,7 @@ function App() {
                 <h3
                   className={cn(
                     "text-lg font-semibold transition-colors duration-300",
-                    file
+                    hasResumeSource
                       ? "text-gray-900 dark:text-white"
                       : "text-gray-400 dark:text-slate-500",
                   )}
@@ -308,7 +358,7 @@ function App() {
               <div
                 className={cn(
                   "transition-all duration-500",
-                  !file && "opacity-50 pointer-events-none",
+                  !hasResumeSource && "opacity-50 pointer-events-none",
                 )}
               >
                 <JobDescriptionInput
@@ -408,7 +458,7 @@ function App() {
                 )}
               </button>
 
-              {(file || jobDescription || currentJobId) && (
+              {(file || selectedResume || jobDescription || currentJobId) && (
                 <button
                   onClick={handleReset}
                   className="py-3 px-6 rounded-xl font-semibold text-gray-700 dark:text-slate-300 bg-gray-100 dark:bg-surface-700 hover:bg-gray-200 dark:hover:bg-surface-600 transition-all duration-200"
