@@ -21,6 +21,12 @@ class UserResume(Base):
     # SHA-256 of the raw file bytes — unique key for dedup
     file_hash = Column(String(64), nullable=False, unique=True, index=True)
 
+    # Anonymous identifier scoping resumes to a single user/install.
+    # NULL means "legacy / web-app upload" — visible to anyone with no
+    # device header. The browser extension generates a UUID on install
+    # and sends it as X-Device-Id; the backend filters by it.
+    device_id = Column(String(64), nullable=True, index=True)
+
     # Original file metadata
     original_filename = Column(String(255), nullable=False)
     original_file_path = Column(String(500), nullable=False)

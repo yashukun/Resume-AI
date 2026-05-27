@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Query
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Query, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -33,6 +33,7 @@ async def upload_resume(
     job_title: str = Form(None, description="Job title (optional)"),
     company_name: str = Form(None, description="Company name (optional)"),
     db: AsyncSession = Depends(get_db),
+    x_device_id: Optional[str] = Header(default=None),
 ):
     """
     Upload a resume file and job description for processing.
@@ -97,6 +98,7 @@ async def upload_resume(
             )
         library_entry = UserResume(
             file_hash=file_hash,
+            device_id=x_device_id,
             original_filename=filename,
             original_file_path=file_path,
             file_type=file_type,

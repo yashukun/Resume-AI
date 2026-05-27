@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "Resume AI — JD Optimizer",
+  "version": "0.2.0",
+  "description": "Automatically detects job descriptions on hiring sites and optimizes your resume against them using your local Resume AI backend.",
+
+  "permissions": ["storage", "activeTab", "scripting", "downloads", "alarms", "tabs"],
+
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
+    "https://www.linkedin.com/*",
+    "https://*.greenhouse.io/*",
+    "https://jobs.lever.co/*",
+    "https://*.lever.co/*",
+    "https://www.indeed.com/*",
+    "https://*.indeed.com/*",
+    "https://jobs.ashbyhq.com/*",
+    "https://*.myworkdayjobs.com/*",
+    "https://www.glassdoor.com/*",
+    "https://jobs.smartrecruiters.com/*"
+  ],
+
+  "action": {
+    "default_title": "Resume AI",
+    "default_popup": "popup.html"
+  },
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.linkedin.com/*",
+        "https://*.greenhouse.io/*",
+        "https://jobs.lever.co/*",
+        "https://*.lever.co/*",
+        "https://www.indeed.com/*",
+        "https://*.indeed.com/*",
+        "https://jobs.ashbyhq.com/*",
+        "https://*.myworkdayjobs.com/*",
+        "https://www.glassdoor.com/*",
+        "https://jobs.smartrecruiters.com/*"
+      ],
+      "js": ["content/sites.js", "content/content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

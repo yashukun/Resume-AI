@@ -1,6 +1,6 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from app.core.database import get_db
 from app.core.config import settings
 from app.models.user_resume import UserResume
@@ -11,9 +11,26 @@ from app.workers.tasks import parse_user_resume
 import uuid
 import hashlib
 import os
-from typing import List
+from typing import List, Optional
 
 router = APIRouter(prefix="/resumes", tags=["Resume Library"])
+
+
+def _device_filter(query, device_id: Optional[str]):
+    """
+    Scope a query by device_id with sensible defaults:
+
+    - With a device_id header → only rows with that device_id (extension scope).
+    - Without one → only rows with NULL device_id (legacy web-app scope).
+
+    This keeps the web app's existing behavior intact: web users don't
+    send the header, so they don't see extension-uploaded resumes (and
+    vice versa). A user who wants both views can stop sending the
+    header on the web side.
+    """
+    if device_id:
+        return query.where(UserResume.device_id == device_id)
+    return query.where(UserResume.device_id.is_(None))
 
 
 def _summary_from_row(r: UserResume) -> UserResumeSummary:
@@ -36,14 +53,17 @@ async def list_resumes(
     limit: int = 50,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    x_device_id: Optional[str] = Header(default=None),
 ):
-    """List parsed resumes in the library, most recent first."""
-    result = await db.execute(
-        select(UserResume)
-        .order_by(UserResume.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
+    """List parsed resumes in the library, most recent first.
+
+    Scoped by ``X-Device-Id`` header — the browser extension sends its
+    install UUID, so each extension install sees only its own uploads.
+    Requests without the header see the legacy (NULL device_id) pool.
+    """
+    q = select(UserResume).order_by(UserResume.created_at.desc())
+    q = _device_filter(q, x_device_id).limit(limit).offset(offset)
+    result = await db.execute(q)
     rows = result.scalars().all()
     return [_summary_from_row(r) for r in rows]
 
@@ -73,12 +93,15 @@ async def get_resume(
 async def upload_resume_to_library(
     file: UploadFile = File(..., description="Resume file (PDF or DOCX)"),
     db: AsyncSession = Depends(get_db),
+    x_device_id: Optional[str] = Header(default=None),
 ):
     """
     Upload a resume to the library without creating a job.
 
     If the same file (by SHA-256) is already present, returns the existing
-    entry without re-uploading or re-parsing.
+    entry without re-uploading or re-parsing. New rows are stamped with
+    the caller's ``X-Device-Id`` so the extension's library stays scoped
+    to that install.
     """
     filename = file.filename or "unknown"
     ext = os.path.splitext(filename)[1].lower()
@@ -130,6 +153,7 @@ async def upload_resume_to_library(
     row = UserResume(
         id=resume_id,
         file_hash=file_hash,
+        device_id=x_device_id,
         original_filename=filename,
         original_file_path=file_path,
         file_type=file_type,

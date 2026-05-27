@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Resume AI</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">RA</div>
+        <div class="brand-text">
+          <h1>Resume AI</h1>
+          <p id="backend-hint" class="sub">localhost:8000</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="connection-pill" class="pill pill-muted">…</span>
+        <button id="settings-toggle" class="icon-btn" title="Settings" aria-label="Settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <section id="settings" class="panel settings hidden">
+      <label for="backend-url">Backend URL</label>
+      <div class="row">
+        <input id="backend-url" type="url" placeholder="http://localhost:8000" />
+        <button id="save-settings" class="btn btn-secondary">Save</button>
+      </div>
+      <p class="hint">Device <code id="device-id">…</code></p>
+    </section>
+
+    <nav class="steps" aria-label="Progress">
+      <div class="step active" data-step="detect">
+        <span class="step-num">1</span>
+        <span>Detect JD</span>
+      </div>
+      <div class="step-line"></div>
+      <div class="step" data-step="resume">
+        <span class="step-num">2</span>
+        <span>Resume</span>
+      </div>
+      <div class="step-line"></div>
+      <div class="step" data-step="optimize">
+        <span class="step-num">3</span>
+        <span>Optimize</span>
+      </div>
+    </nav>
+
+    <!-- JD card -->
+    <section id="jd-card" class="panel jd-panel">
+      <div id="jd-scanning" class="jd-scanning">
+        <div class="scan-dots"><span></span><span></span><span></span></div>
+        <p>Scanning this page for a job description…</p>
+      </div>
+
+      <div id="jd-empty" class="jd-empty hidden">
+        <div class="empty-icon">◇</div>
+        <p class="empty-title">No job description found</p>
+        <p class="hint">Open a job posting on LinkedIn, Greenhouse, Lever, Indeed, Ashby, or Workday — we detect it automatically.</p>
+        <button id="detect-now" class="btn btn-secondary btn-block">Scan again</button>
+      </div>
+
+      <div id="jd-detected" class="jd-detected hidden">
+        <div class="jd-header">
+          <div>
+            <p class="jd-title" id="jd-title">—</p>
+            <p class="jd-company" id="jd-company">—</p>
+          </div>
+          <span id="jd-site-badge" class="pill pill-success">detected</span>
+        </div>
+        <p class="hint jd-url" id="jd-url"></p>
+        <details class="jd-preview-wrap">
+          <summary>Preview description</summary>
+          <pre id="jd-preview"></pre>
+        </details>
+      </div>
+    </section>
+
+    <!-- Resume picker -->
+    <section id="resume-section" class="panel hidden">
+      <div class="panel-head">
+        <h2>Your resume</h2>
+        <button id="refresh-resumes" class="btn-link" type="button">Refresh</button>
+      </div>
+      <div id="resume-list" class="resume-list"></div>
+      <details class="upload-details">
+        <summary>Upload a new resume</summary>
+        <input id="resume-file" type="file" accept=".pdf,.docx" />
+        <button id="upload-resume" class="btn btn-secondary btn-block">Upload &amp; parse</button>
+      </details>
+    </section>
+
+    <!-- Optimize -->
+    <section id="action-section" class="panel hidden">
+      <div id="progress-wrap" class="progress-wrap hidden">
+        <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+        <p id="status-line" class="status-line"></p>
+      </div>
+      <button id="optimize-btn" class="btn btn-primary btn-block" disabled>
+        Optimize for this role
+      </button>
+    </section>
+
+    <!-- Result -->
+    <section id="result-section" class="panel result-panel hidden">
+      <div class="result-hero">
+        <span class="result-icon">✓</span>
+        <div>
+          <p class="result-title">Resume ready</p>
+          <p id="result-sub" class="hint">Tailored DOCX is waiting for you.</p>
+        </div>
+      </div>
+      <div class="result-actions">
+        <button id="download-btn" class="btn btn-primary">Download DOCX</button>
+        <button id="apply-btn" class="btn btn-secondary">Open job page</button>
+      </div>
+      <button id="new-job-btn" class="btn-link btn-block-center">Optimize another role</button>
+    </section>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

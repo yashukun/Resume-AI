@@ -91,3 +91,16 @@ async def init_db():
             ))
         except Exception as e:
             logger.warning(f"Post-create migration step failed: {e}")
+
+        # user_resumes.device_id was added with the browser extension.
+        try:
+            await conn.execute(text(
+                "ALTER TABLE user_resumes ADD COLUMN IF NOT EXISTS "
+                "device_id VARCHAR(64)"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_user_resumes_device_id "
+                "ON user_resumes (device_id)"
+            ))
+        except Exception as e:
+            logger.warning(f"device_id migration step failed: {e}")

@@ -51,7 +51,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS middleware
+# CORS middleware — local web dev origins + the browser extension.
+# Chrome assigns a per-install extension ID, so we match by regex
+# instead of hard-coding individual IDs.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -60,9 +62,11 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
+    allow_origin_regex=r"^chrome-extension://[a-z0-9]+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 # Include routers
